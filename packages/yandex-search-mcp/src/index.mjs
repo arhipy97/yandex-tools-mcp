@@ -5,6 +5,7 @@ import { domainToUnicode } from 'node:url';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
+import { checkPositions, parseSerp } from './serp.mjs';
 
 // Reported to MCP clients; read from package.json so it can't drift from releases.
 const { version } = createRequire(import.meta.url)('../package.json');
@@ -160,6 +161,82 @@ function parseXMLResults(xmlData, includeImages = false) {
   return results;
 }
 
+const REQUEST_TIMEOUT_MS = 15000;
+
+// POSTs a Search API request and returns the decoded XML; throws on HTTP errors
+// and on a response without rawData.
+async function requestXml(requestBody, apiKey) {
+  const response = await fetch(BASE_URL, {
+    method: 'POST',
+    headers: {
+      Authorization: `Api-Key ${apiKey}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(requestBody),
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    let errorMessage = `Yandex Search API error (${response.status}): ${response.statusText}`;
+    try {
+      const errorJson = JSON.parse(errorText);
+      if (errorJson.message) {
+        errorMessage = errorJson.message;
+      }
+    } catch {
+      if (errorText) {
+        errorMessage = errorText;
+      }
+    }
+    throw new Error(errorMessage);
+  }
+
+  const data = await response.json();
+  if (typeof data.rawData !== 'string') {
+    throw new Error('Yandex Search API response has no rawData');
+  }
+  return Buffer.from(data.rawData, 'base64').toString('utf-8');
+}
+
+// Compact ru-web SERP for rank checks; never throws, errors come back as `error`.
+async function fetchSerp(query, region, depth) {
+  try {
+    const { apiKey, folderId } = getCredentials();
+    const xml = await requestXml(
+      {
+        query: {
+          searchType: 'SEARCH_TYPE_RU',
+          queryText: query,
+          familyMode: 'FAMILY_MODE_MODERATE',
+          page: '0',
+          fixTypoMode: 'FIX_TYPO_MODE_ON',
+        },
+        sortSpec: { sortMode: 'SORT_MODE_BY_RELEVANCE', sortOrder: 'SORT_ORDER_DESC' },
+        groupSpec: { groupMode: 'GROUP_MODE_DEEP', groupsOnPage: String(depth), docsInGroup: '1' },
+        folderId,
+        responseFormat: 'FORMAT_XML',
+        l10n: 'LOCALIZATION_RU',
+        region: String(region),
+      },
+      apiKey,
+    );
+    return parseSerp(xml);
+  } catch (e) {
+    return { error: e instanceof Error ? e.message : String(e), results: [] };
+  }
+}
+
+const REGION_NAMES = { 157: 'Минск', 213: 'Москва' };
+
+function formatRow(row, depthDefault) {
+  const region = REGION_NAMES[row.region] ?? String(row.region);
+  const head = `${row.phrase} · ${region}`;
+  if (row.status === 'found') return `${head} · ${row.position} · ${row.url}`;
+  if (row.status === 'not_found') return `${head} · вне топ-${row.checked ?? depthDefault}`;
+  return `${head} · ошибка: ${row.error}`;
+}
+
 async function search(query, options = {}) {
   const { apiKey, folderId } = getCredentials();
   const maxResults = options.maxResults || 10;
@@ -212,33 +289,9 @@ async function search(query, options = {}) {
     requestBody.region = String(options.region);
   }
 
-  const response = await fetch(BASE_URL, {
-    method: 'POST',
-    headers: {
-      Authorization: `Api-Key ${apiKey}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify(requestBody),
-  });
-
-  if (!response.ok) {
-    const errorText = await response.text();
-    let errorMessage = `Yandex Search API error (${response.status}): ${response.statusText}`;
-    try {
-      const errorJson = JSON.parse(errorText);
-      if (errorJson.message) {
-        errorMessage = errorJson.message;
-      }
-    } catch {
-      if (errorText) {
-        errorMessage = errorText;
-      }
-    }
-    throw new Error(errorMessage);
-  }
-
-  const data = await response.json();
-  const xmlData = Buffer.from(data.rawData, 'base64').toString('utf-8');
+  const xmlData = await requestXml(requestBody, apiKey);
+  const serp = parseSerp(xmlData);
+  if (serp.error?.startsWith('yandex ')) throw new Error(serp.error);
   const results = parseXMLResults(xmlData, includeImages);
 
   return results.slice(0, maxResults);
@@ -253,11 +306,12 @@ server.registerTool(
   'search',
   {
     title: 'Yandex Search',
+    annotations: { readOnlyHint: true },
     description:
       'Search the web using Yandex. Optimized for Russian and Cyrillic content but works for any language. Returns structured results with position, url, domain, title, headline (meta description), passages (text snippets array), snippet (combined text), size, lang, and cachedUrl.',
     inputSchema: {
       query: z.string().describe('Search query'),
-      maxResults: z.number().min(1).max(100).optional().describe('Maximum number of results (default: 10, max: 100)'),
+      maxResults: z.number().min(1).max(10).optional().describe('Maximum number of results (default: 10, max: 10)'),
       includeImages: z.boolean().optional().describe('Include image URLs in results (default: false)'),
       region: z.number().optional().describe('Region ID for localized results (e.g., 213 for Moscow)'),
       page: z.number().min(0).optional().describe('Page number for pagination (default: 0)'),
@@ -284,6 +338,26 @@ server.registerTool(
         },
       ],
     };
+  },
+);
+
+server.registerTool(
+  'positions',
+  {
+    title: 'Yandex Positions',
+    description:
+      'Check where a site ranks in Yandex web search for each phrase and region. Returns one line per phrase and region pair: position, or "вне топ-N" when not found in the checked results. Regions: 157 Минск, 213 Москва.',
+    annotations: { readOnlyHint: true },
+    inputSchema: {
+      phrases: z.array(z.string().min(1)).min(1).max(20).describe('Search phrases (1 to 20)'),
+      regions: z.array(z.number()).min(1).optional().describe('Yandex region IDs (default: [157, 213])'),
+      domain: z.string().min(1).optional().describe('Site domain to look for (default: fluffme.design)'),
+      depth: z.number().int().min(1).max(100).optional().describe('How many results to check (default: 40)'),
+    },
+  },
+  async ({ phrases, regions, domain, depth }) => {
+    const rows = await checkPositions({ phrases, regions, domain, depth }, fetchSerp);
+    return { content: [{ type: 'text', text: rows.map((r) => formatRow(r, depth ?? 40)).join('\n') }] };
   },
 );
 
