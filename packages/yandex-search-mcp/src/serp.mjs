@@ -1,15 +1,18 @@
 // Compact SERP parsing and rank checking for the `positions` tool.
 
 export function parseSerp(xml) {
-  const err = xml.match(/<error\s+code="([^"]*)"[^>]*>([\s\S]*?)<\/error>/);
-  if (err) return { error: `yandex ${err[1]}: ${err[2].trim()}`, results: [] };
+  const err = xml.match(/<error(?:\s[^>]*)?>([\s\S]*?)<\/error>/);
+  if (err) {
+    const code = err[0].match(/code="([^"]*)"/)?.[1] ?? '?';
+    return { error: `yandex ${code}: ${err[1].trim()}`, results: [] };
+  }
 
   const groups = [...xml.matchAll(/<group>([\s\S]*?)<\/group>/g)];
   if (groups.length === 0) return { error: 'empty', results: [] };
 
   const results = [];
   for (const [i, g] of groups.entries()) {
-    const url = g[1].match(/<doc[^>]*>[\s\S]*?<url>([^<]+)<\/url>/)?.[1];
+    const url = g[1].match(/<doc(?:\s[^>]*)?>[\s\S]*?<url>([^<]+)<\/url>/)?.[1];
     let host;
     try {
       host = url && new URL(url).hostname.toLowerCase();
@@ -22,8 +25,17 @@ export function parseSerp(xml) {
   return { results };
 }
 
+export function normalizeDomain(domain) {
+  return domain
+    .trim()
+    .toLowerCase()
+    .replace(/^[a-z][a-z0-9+.-]*:\/\//, '')
+    .replace(/\/.*$/, '')
+    .replace(/^www\./, '');
+}
+
 export function findSite(results, domain) {
-  const d = domain.toLowerCase();
+  const d = normalizeDomain(domain);
   const hit = results.find((r) => r.host === d || r.host.endsWith(`.${d}`));
   return hit ? { position: hit.position, url: hit.url } : null;
 }

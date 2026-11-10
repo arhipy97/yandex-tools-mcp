@@ -5,26 +5,11 @@ import { domainToUnicode } from 'node:url';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
+import { fetchSerp, getCredentials, requestXml } from './client.mjs';
 import { checkPositions, parseSerp } from './serp.mjs';
 
 // Reported to MCP clients; read from package.json so it can't drift from releases.
 const { version } = createRequire(import.meta.url)('../package.json');
-
-const BASE_URL = 'https://searchapi.api.cloud.yandex.net/v2/web/search';
-
-function getCredentials() {
-  const apiKey = process.env.YANDEX_SEARCH_API_KEY;
-  const folderId = process.env.YANDEX_FOLDER_ID;
-
-  if (!apiKey) {
-    throw new Error('YANDEX_SEARCH_API_KEY environment variable is required. Get it from Yandex Cloud console.');
-  }
-  if (!folderId) {
-    throw new Error('YANDEX_FOLDER_ID environment variable is required. Get it from Yandex Cloud console.');
-  }
-
-  return { apiKey, folderId };
-}
 
 function detectLanguage(text) {
   const cyrillicPattern = /[\u0400-\u04FF]/;
@@ -161,72 +146,6 @@ function parseXMLResults(xmlData, includeImages = false) {
   return results;
 }
 
-const REQUEST_TIMEOUT_MS = 15000;
-
-// POSTs a Search API request and returns the decoded XML; throws on HTTP errors
-// and on a response without rawData.
-async function requestXml(requestBody, apiKey) {
-  const response = await fetch(BASE_URL, {
-    method: 'POST',
-    headers: {
-      Authorization: `Api-Key ${apiKey}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify(requestBody),
-    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-  });
-
-  if (!response.ok) {
-    const errorText = await response.text();
-    let errorMessage = `Yandex Search API error (${response.status}): ${response.statusText}`;
-    try {
-      const errorJson = JSON.parse(errorText);
-      if (errorJson.message) {
-        errorMessage = errorJson.message;
-      }
-    } catch {
-      if (errorText) {
-        errorMessage = errorText;
-      }
-    }
-    throw new Error(errorMessage);
-  }
-
-  const data = await response.json();
-  if (typeof data.rawData !== 'string') {
-    throw new Error('Yandex Search API response has no rawData');
-  }
-  return Buffer.from(data.rawData, 'base64').toString('utf-8');
-}
-
-// Compact ru-web SERP for rank checks; never throws, errors come back as `error`.
-async function fetchSerp(query, region, depth) {
-  try {
-    const { apiKey, folderId } = getCredentials();
-    const xml = await requestXml(
-      {
-        query: {
-          searchType: 'SEARCH_TYPE_RU',
-          queryText: query,
-          familyMode: 'FAMILY_MODE_MODERATE',
-          page: '0',
-          fixTypoMode: 'FIX_TYPO_MODE_ON',
-        },
-        sortSpec: { sortMode: 'SORT_MODE_BY_RELEVANCE', sortOrder: 'SORT_ORDER_DESC' },
-        groupSpec: { groupMode: 'GROUP_MODE_DEEP', groupsOnPage: String(depth), docsInGroup: '1' },
-        folderId,
-        responseFormat: 'FORMAT_XML',
-        l10n: 'LOCALIZATION_RU',
-        region: String(region),
-      },
-      apiKey,
-    );
-    return parseSerp(xml);
-  } catch (e) {
-    return { error: e instanceof Error ? e.message : String(e), results: [] };
-  }
-}
-
 const REGION_NAMES = { 157: 'Минск', 213: 'Москва' };
 
 function formatRow(row, depthDefault) {
@@ -291,7 +210,8 @@ async function search(query, options = {}) {
 
   const xmlData = await requestXml(requestBody, apiKey);
   const serp = parseSerp(xmlData);
-  if (serp.error?.startsWith('yandex ')) throw new Error(serp.error);
+  // Yandex error 15 means "nothing found": keep upstream behaviour (empty list) for search.
+  if (serp.error?.startsWith('yandex ') && !serp.error.startsWith('yandex 15:')) throw new Error(serp.error);
   const results = parseXMLResults(xmlData, includeImages);
 
   return results.slice(0, maxResults);

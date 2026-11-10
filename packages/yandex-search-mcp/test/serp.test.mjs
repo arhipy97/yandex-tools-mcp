@@ -43,3 +43,20 @@ test('findSite matches host and subdomains only', () => {
   assert.deepEqual(findSite(results, 'fluffme.design'), { position: 2, url: 'https://www.fluffme.design/x' });
   assert.equal(findSite(results.slice(0, 1), 'fluffme.design'), null);
 });
+
+test('parseSerp: error without code attribute', () => {
+  const { error } = parseSerp('<response><error>Bad things</error></response>');
+  assert.match(error, /Bad things/);
+});
+
+test('parseSerp: doccount is not a doc', () => {
+  const res = parseSerp('<group><doccount>3</doccount><url>https://a.com/</url></group>');
+  assert.equal(res.error, 'broken group 1');
+});
+
+test('findSite normalizes domain input', () => {
+  const results = [{ position: 4, url: 'https://fluffme.design/', host: 'fluffme.design' }];
+  for (const d of ['https://www.FluffMe.design/', 'www.fluffme.design', 'fluffme.design/']) {
+    assert.deepEqual(findSite(results, d), { position: 4, url: 'https://fluffme.design/' });
+  }
+});
