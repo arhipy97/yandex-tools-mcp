@@ -56,3 +56,9 @@ test('21 phrases rejected', async () => {
     /phrases/,
   );
 });
+
+test('only first depth results count', async () => {
+  const rows = await checkPositions({ phrases: ['a'], regions: [213] }, async () => ({ results: res(41, 41) }));
+  assert.equal(rows[0].status, 'not_found');
+  assert.equal(rows[0].checked, 40);
+});

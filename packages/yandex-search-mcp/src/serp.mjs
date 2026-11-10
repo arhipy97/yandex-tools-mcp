@@ -63,7 +63,8 @@ export async function checkPositions(
   const pairs = phrases.flatMap((phrase) => regions.map((region) => ({ phrase, region })));
   return mapLimit(pairs, 4, async ({ phrase, region }) => {
     try {
-      const { error, results } = await fetchSerp(phrase, region, depth);
+      const { error, results: all } = await fetchSerp(phrase, region, depth);
+      const results = all?.slice(0, depth) ?? [];
       if (error) return { phrase, region, status: 'error', error };
       const hit = findSite(results, domain);
       if (hit) return { phrase, region, status: 'found', position: hit.position, url: hit.url };
