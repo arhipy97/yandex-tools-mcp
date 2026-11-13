@@ -266,7 +266,7 @@ server.registerTool(
   {
     title: 'Yandex Positions',
     description:
-      'Check where a site ranks in Yandex web search for each phrase and region. Returns one line per phrase and region pair: position, or "вне топ-N" when not found in the checked results. Regions: 157 Минск, 213 Москва.',
+      'Check where a site ranks in Yandex web search for each phrase and region. Returns one line per phrase and region pair: position, or "вне топ-N" when not found in the checked results. Regions: 157 Минск, 213 Москва. Requests run one at a time (Search API quota is 1 per second), about 1 s per pair; a quota error is retried once.',
     annotations: { readOnlyHint: true },
     inputSchema: {
       phrases: z.array(z.string().min(1)).min(1).max(20).describe('Search phrases (1 to 20)'),

@@ -40,30 +40,38 @@ export function findSite(results, domain) {
   return hit ? { position: hit.position, url: hit.url } : null;
 }
 
-async function mapLimit(items, limit, fn) {
-  const out = new Array(items.length);
-  let next = 0;
-  const worker = async () => {
-    while (next < items.length) {
-      const i = next++;
-      out[i] = await fn(items[i]);
-    }
-  };
-  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
-  return out;
-}
+// Search API sync quota is 1 request per second per folder: requests go one at a
+// time, starts spaced by gapMs; a quota error is retried once after retryMs.
+const QUOTA_RE = /quota|rate limit|too many requests|429/i;
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 export async function checkPositions(
   { phrases, regions = [157, 213], domain = 'fluffme.design', depth = 40 },
   fetchSerp,
+  { gapMs = 1100, retryMs = 2000 } = {},
 ) {
   if (!Array.isArray(phrases) || phrases.length < 1 || phrases.length > 20) {
     throw new Error('phrases: expected 1 to 20 items');
   }
   const pairs = phrases.flatMap((phrase) => regions.map((region) => ({ phrase, region })));
-  return mapLimit(pairs, 4, async ({ phrase, region }) => {
+  let lastStart = -Infinity;
+  const throttled = async (phrase, region) => {
+    const wait = lastStart + gapMs - Date.now();
+    if (wait > 0) await sleep(wait);
+    lastStart = Date.now();
+    return fetchSerp(phrase, region, depth);
+  };
+  const out = [];
+  for (const { phrase, region } of pairs) out.push(await checkOne(phrase, region));
+  return out;
+
+  async function checkOne(phrase, region) {
     try {
-      const { error, results: all } = await fetchSerp(phrase, region, depth);
+      let { error, results: all } = await throttled(phrase, region);
+      if (error && QUOTA_RE.test(error)) {
+        await sleep(retryMs);
+        ({ error, results: all } = await throttled(phrase, region));
+      }
       const results = all?.slice(0, depth) ?? [];
       if (error) return { phrase, region, status: 'error', error };
       const hit = findSite(results, domain);
@@ -72,5 +80,5 @@ export async function checkPositions(
     } catch (e) {
       return { phrase, region, status: 'error', error: e instanceof Error ? e.message : String(e) };
     }
-  });
+  }
 }
